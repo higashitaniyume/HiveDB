@@ -1,133 +1,318 @@
 # HiveDB
 
-基于二进制文件的树形数据库，API 设计参考 Windows 注册表（`Microsoft.Win32.Registry`），支持层级键值存储、多种数据类型、路径直读。
+A lightweight, single-file embedded key-value database for .NET, inspired by the Windows Registry hive file format.
 
-## 项目结构
+## Overview
 
-```
-src/HiveDB/         # 类库 (.NET 9.0)
-test/HiveDB.Tests/  # xUnit 测试项目 (88 条测试)
-```
+HiveDB stores hierarchical key-value data in a single `.db` file with a fixed 4096-byte page structure. It supports seven value types, transparent AES-256-GCM encryption, HMAC-SHA256 signing, CRC integrity checks, and a full-featured CLI.
 
-## 快速开始
+### Use Cases
+
+- Desktop application configuration storage
+- Embedded system data persistence
+- Hierarchical settings (registry-style key paths like `Software\MyApp\Settings`)
+- Projects that need a simple embedded database without SQLite or external dependencies
+
+### Key Features
+
+- **Single-file storage** — all data in one `.db` file
+- **Hierarchical key tree** — keys organized as `Software\MyApp\Settings`, supporting parent-child nesting
+- **7 value types** — String, DWord (int32), QWord (int64), Binary, MultiString, ExpandString, None
+- **AES-256-GCM encryption** — authenticated encryption per page (net8.0+)
+- **HMAC-SHA256 signing** — integrity protection without encryption (all targets)
+- **CRC integrity** — CRC-32 on file header, CRC-16 on each data page
+- **LRU page cache** — 64-page (256 KB) cache for fast access
+- **Free page recycling** — deleted pages are reused automatically
+- **Overflow chains** — large values span multiple pages via linked overflow chains
+- **Concurrent-safe** — `ReaderWriterLockSlim` supports multiple readers with a single writer
+- **Zero external dependencies** — core library depends only on the .NET BCL
+- **Multi-target** — `netstandard2.1` (HMAC) + `net8.0` (full GCM + HMAC)
+
+---
+
+## Framework Support
+
+| Target | Encryption | Signing | Compatible Runtimes |
+|--------|-----------|---------|-------------------|
+| `net8.0` | AES-256-GCM | HMAC-SHA256 | .NET 8, 9, 10+ |
+| `netstandard2.1` | — | HMAC-SHA256 | .NET Core 3.0+, .NET 5+, Mono 6.4+, Xamarin, Unity 2021.2+ |
+
+---
+
+## File Format
+
+Fixed 4096-byte pages. The magic number is `48 49 56 45` — ASCII `HIVE` in little-endian.
+
+### Page 0 — File Header
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| `0x00` | 4 | Magic | `HIVE` |
+| `0x04` | 4 | Version | `1` |
+| `0x08` | 4 | PageSize | `4096` |
+| `0x0C` | 4 | FreePageHead | Free list head page number |
+| `0x10` | 4 | RootKeyPage | Root key page (always `1`) |
+| `0x14` | 4 | TotalPageCount | Total allocated pages |
+| `0x18` | 4 | CRC32 | CRC-32 of bytes 0–23 |
+| `0x1C` | 56 | EncHeader | Protection metadata (mode, salt, key check, iterations) |
+
+### Page Types
+
+| Value | Name | Purpose |
+|-------|------|---------|
+| `0x00` | Free | Free page (allocator free list) |
+| `0x01` | Header | Page 0 (file header) |
+| `0x02` | Key | Key page (tree node with values) |
+| `0x03` | Overflow | Overflow data page (large value chain) |
+
+### Key Page Layout
+
+| Field | Size | Description |
+|-------|------|-------------|
+| PageType | 1 | `0x02` |
+| Flags | 1 | bit 0 = IsDeleted |
+| CRC16 | 2 | CRC-16 of bytes 4–4095 |
+| KeyNameLen | 2 | Key name UTF-8 length |
+| ParentPage | 4 | Parent page number |
+| FirstChildPage | 4 | First child page (linked list head) |
+| NextSiblingPage | 4 | Next sibling page (linked list) |
+| ValueCount | 2 | Number of value entries |
+| KeyName | variable | Key name (UTF-8) |
+| ValueEntries | variable | Value entry sequence |
+
+### Protected Page Layout (GCM / HMAC)
+
+When protection is active, each data page reserves a 28-byte footer:
+
+| Offset | Size | Content |
+|--------|------|---------|
+| `0x000` | 1 | PageType (unencrypted, GCM associated data) |
+| `0x001` | 4067 | Payload (encrypted for GCM, plain for HMAC) |
+| `0xFE4` | 12 | Nonce (GCM) / zeros (HMAC) |
+| `0xFF0` | 16 | Auth tag (GCM) / truncated HMAC-SHA256 |
+
+---
+
+## API Reference
+
+### Creating and Opening
 
 ```csharp
-using HiveDB;
+// Create a new database
+using var db = RegistryDatabase.Create("config.db");
 
-// 创建数据库文件
-using var db = RegistryDatabase.Create(@"C:\data\mydb.dat");
+// Create with AES-256-GCM encryption
+using var db = RegistryDatabase.Create("config.db", password: "mysecret");
 
-// ---- 方式一：路径直读 ----
-db.CreateKey(@"Software\MyApp\Settings");
-db.SetValue(@"Software\MyApp\Settings", "Theme", "dark", RegistryValueKind.String);
-db.SetValue(@"Software\MyApp\Settings", "Count", 42, RegistryValueKind.DWord);
-db.SetValue(@"Software\MyApp\Settings", "Data", new byte[] { 1, 2, 3 }, RegistryValueKind.Binary);
+// Create with HMAC signing only (no encryption)
+using var db = RegistryDatabase.Create("config.db", password: "mysecret", signOnly: true);
 
-object? theme = db.GetValue(@"Software\MyApp\Settings", "Theme"); // "dark"
-bool exists = db.KeyExists(@"Software\MyApp\Settings");           // true
-db.DeleteKey(@"Software\MyApp", recursive: true);
+// Open (read-only)
+using var db = RegistryDatabase.Open("config.db", readOnly: true);
 
-// ---- 方式二：RegistryKey 导航 ----
-using var root = db.RootKey;
-using var key = root.CreateSubKey(@"Software\MyApp");
-key.SetValue("Version", "1.0.0");           // 自动推断类型为 String
-key.SetValue("MaxUsers", 100);              // 自动推断类型为 DWord
-key.SetValue("Config", new string[] { "a", "b" }); // 自动推断为 MultiString
-
-string? ver = key.GetValue<string>("Version");  // 泛型取值
-
-// 只读打开
-using var ro = RegistryDatabase.Open(@"C:\data\mydb.dat", readOnly: true);
+// Open with password
+using var db = RegistryDatabase.Open("config.db", password: "mysecret");
 ```
 
-## 支持的数据类型
+### Key Operations
 
-| 枚举值 | 对应 Registry | C# 类型 |
-|--------|-------------|---------|
-| `String` | REG_SZ | `string` |
-| `ExpandString` | REG_EXPAND_SZ | `string` |
-| `Binary` | REG_BINARY | `byte[]` |
-| `DWord` | REG_DWORD | `int` |
-| `QWord` | REG_QWORD | `long` |
-| `MultiString` | REG_MULTI_SZ | `string[]` |
-| `None` | REG_NONE | `byte[]` |
+```csharp
+// Create keys (auto-creates intermediate paths)
+db.CreateKey(@"Software\MyApp\Settings");
 
-## API 概览
+// Check existence
+bool exists = db.KeyExists(@"Software\MyApp\Settings");
 
-### RegistryDatabase
+// List sub-keys
+string[] subKeys = db.GetSubKeyNames(@"Software\MyApp");
 
-| 方法 | 说明 |
-|------|------|
-| `Create(path)` | 创建新数据库文件 |
-| `Open(path, readOnly?)` | 打开已有数据库 |
-| `RootKey` | 获取根键（RegistryKey） |
-| `CreateKey(path)` | 创建键（含所有中间层） |
-| `DeleteKey(path, recursive?)` | 删除键 |
-| `KeyExists(path)` | 判断键是否存在 |
-| `GetSubKeyNames(path)` | 获取所有子键名称 |
-| `SetValue(path, name, value, kind)` | 设置值 |
-| `GetValue(path, name, default?)` | 获取值 |
-| `GetValueKind(path, name)` | 获取值的类型 |
-| `DeleteValue(path, name)` | 删除值 |
-| `GetValueNames(path)` | 获取所有值名称 |
-| `Flush()` | 强制刷盘 |
-| `Dispose()` | 关闭文件 |
+// Delete (recursive to remove children)
+db.DeleteKey(@"Software\MyApp", recursive: true);
+```
 
-### RegistryKey
+### Value Operations
 
-| 方法 | 说明 |
-|------|------|
-| `CreateSubKey(name)` | 创建子键（支持路径如 `"A\B\C"`） |
-| `OpenSubKey(name, writable?)` | 打开子键 |
-| `DeleteSubKey(name, recursive?)` | 删除子键 |
-| `HasSubKey(name)` | 判断子键是否存在 |
-| `GetSubKeyNames()` | 获取所有子键名称 |
-| `SetValue(name, value)` | 设置值（自动推断类型） |
-| `SetValue(name, value, kind)` | 设置值（显式指定类型） |
-| `GetValue(name, default?)` | 获取值 |
-| `GetValueKind(name)` | 获取值类型 |
-| `DeleteValue(name)` | 删除值 |
-| `GetValueNames()` | 获取所有值名称 |
-| `Name` / `FullPath` | 键名称 / 完整路径 |
-| `ParentKey` | 父键 |
-| `Database` | 所属数据库 |
-| `Dispose()` | 释放句柄 |
+```csharp
+// Write values
+db.SetValue(@"Software\MyApp\Settings", "Theme", "dark", RegistryValueKind.String);
+db.SetValue(@"Software\MyApp\Settings", "MaxItems", 100, RegistryValueKind.DWord);
+db.SetValue(@"Software\MyApp\Settings", "MaxSize", 1024L * 1024 * 1024, RegistryValueKind.QWord);
+db.SetValue(@"Software\MyApp\Settings", "Thumbnail", new byte[] { 0xFF, 0xD8 }, RegistryValueKind.Binary);
+db.SetValue(@"Software\MyApp", "Hosts", new[] { "localhost", "127.0.0.1" }, RegistryValueKind.MultiString);
 
-### RegistryKeyExtensions
+// Read values
+object? theme = db.GetValue(@"Software\MyApp\Settings", "Theme");   // "dark"
+object? count = db.GetValue(@"Software\MyApp\Settings", "MaxItems"); // 100
 
-| 方法 | 说明 |
-|------|------|
-| `GetValue<T>(name, default?)` | 泛型取值 |
+// Get value kind
+RegistryValueKind kind = db.GetValueKind(@"Software\MyApp\Settings", "MaxSize"); // QWord
 
-## 文件格式
+// List value names
+string[] names = db.GetValueNames(@"Software\MyApp\Settings");
 
-- **页大小**：4096 字节
-- **页 0**：文件头（魔数 `VREG`、版本号、根键位置、空闲链表头、CRC32）
-- **Key 页**：键名、父子/兄弟页指针、内联值列表（带 CRC16）
-- **Overflow 页**：大值（>~4KB）的链表存储
-- **Free 页**：已删除页的空闲链表，分配时优先复用
+// Delete a value
+db.DeleteValue(@"Software\MyApp\Settings", "Thumbnail");
+```
 
-## 限制
+### RegistryKey Object Model
 
-| 项目 | 限制 |
-|------|------|
-| 键名 | 最多 255 字节 (UTF-8) |
-| 路径深度 | 最多 32 层 |
-| 单个值 | 最大 16 MB |
+```csharp
+using var key = db.RootKey.CreateSubKey(@"Software\MyApp");
 
-## 异常
+// Implicit type inference
+key.SetValue("Theme", "dark");          // → String
+key.SetValue("Count", 42);              // → DWord
+key.SetValue("MaxSize", 100L * 1024);   // → QWord
 
-| 异常 | 触发场景 |
-|------|----------|
-| `HiveDBException` | 文件损坏、魔数错误、CRC 校验失败 |
-| `KeyNotFoundException` | 键或值不存在 |
-| `InvalidOperationException` | 只读数据库写入、删除有子键的非递归操作 |
-| `ArgumentException` | 非法路径/名称 |
-| `ObjectDisposedException` | 已释放对象上操作 |
+// Generic read
+string? theme = key.GetValue<string>("Theme");
+int? count = key.GetValue<int>("Count");
 
-## 构建与测试
+// Enumerate children
+foreach (var subKeyName in key.GetSubKeyNames())
+    Console.WriteLine(subKeyName);
+```
+
+### Supported Value Types
+
+| Enum | C# Type | Description |
+|------|---------|-------------|
+| `String` | `string` | UTF-8 string, null-terminated |
+| `DWord` | `int` | 32-bit signed integer |
+| `QWord` | `long` | 64-bit signed integer |
+| `Binary` | `byte[]` | Raw byte array |
+| `MultiString` | `string[]` | Array of null-terminated strings |
+| `ExpandString` | `string` | Expandable string (same serialization as String) |
+| `None` | `byte[]` | Raw binary with no type hint |
+
+---
+
+## CLI Tool
+
+```
+Usage:
+  HiveDB.CLI [command] [options]
+
+Commands:
+  create       <file>                          Create a new HiveDB database file
+  set          <file> <path> <name> <value>    Set a value in the database
+  get          <file> <path> <name>            Get a value from the database
+  enum         <file> <path>                   List sub-keys and values at a path
+  delete-key   <file> <path>                   Delete a key (alias: rmkey)
+  delete-value <file> <path> <name>            Delete a value (alias: rmval)
+  info         <file>                          Display database metadata
+  test         <file>                          Run functional test suite
+  bench        <file>                          Run performance benchmark
+
+Options:
+  -p, --password    Database password (for encryption/signing)
+  -s, --sign        HMAC signing only (no encryption)
+  -k, --kind        Value type: auto|string|dword|qword|binary|multi|hex
+  -r, --recursive   Delete key and all sub-keys
+  -n, --count       Benchmark iteration count
+```
+
+### CLI Examples
 
 ```bash
-dotnet build HiveDB.sln
-dotnet test HiveDB.sln
+# Create a plain database
+HiveDB.CLI create myapp.db
+
+# Create with GCM encryption
+HiveDB.CLI create myapp.db -p "mysecret"
+
+# Create with HMAC signing only
+HiveDB.CLI create myapp.db -p "mysecret" --sign
+
+# Write values
+HiveDB.CLI set myapp.db "App\\UI" Theme dark -p "mysecret"
+HiveDB.CLI set myapp.db "App\\UI" FontSize 14 -k int -p "mysecret"
+
+# Read values
+HiveDB.CLI get myapp.db "App\\UI" Theme -p "mysecret"   # → dark
+
+# Browse data
+HiveDB.CLI enum myapp.db "App\\UI"
+# Key: App\UI
+# ------------------------------------------------------------
+# Values:
+#   FontSize = 14  (DWord)
+#   Theme = dark  (String)
+
+# Show metadata
+HiveDB.CLI info myapp.db
+# File:        myapp.db
+# Size:        136.0 KB
+# Pages:       34
+# Read-only:   True
+# Keys:        2
+# Values:      2
+
+# Run tests and benchmarks
+HiveDB.CLI test test.db
+HiveDB.CLI bench bench.db -n 1000
 ```
+
+---
+
+## Project Structure
+
+```
+├── src/
+│   ├── HiveDB/                       # Core library (netstandard2.1 + net8.0)
+│   │   ├── HiveDBException.cs        # Custom exceptions
+│   │   ├── Polyfills.cs              # IsExternalInit polyfill for netstandard2.1
+│   │   ├── RegistryDatabase.cs       # Public API (factory + path-based operations)
+│   │   ├── RegistryKey.cs            # Key node API
+│   │   ├── RegistryKeyExtensions.cs  # GetValue<T> generic extension
+│   │   ├── RegistryValueKind.cs      # Value type enum
+│   │   ├── Storage/
+│   │   │   ├── BinaryFileHandle.cs   # Low-level file I/O with locking
+│   │   │   ├── Crc16.cs              # CRC-16 (polynomial 0x1021)
+│   │   │   ├── Crc32.cs              # CRC-32 (polynomial 0xEDB88320)
+│   │   │   ├── CryptoManager.cs      # AES-256-GCM + HMAC-SHA256 engine
+│   │   │   ├── EncryptionHeader.cs   # Protection metadata in file header
+│   │   │   ├── FileHeader.cs         # Page 0 header (magic, version, CRC-32)
+│   │   │   ├── PageCache.cs          # LRU page cache (64 pages)
+│   │   │   ├── PageManager.cs        # Page alloc/free, overflow chains, CRC, crypto
+│   │   │   └── PageType.cs           # Page type enum
+│   │   ├── Tree/
+│   │   │   ├── KeyPage.cs            # Key page serialization + value entry management
+│   │   │   └── TreeNavigator.cs      # Path resolution and tree traversal
+│   │   └── Value/
+│   │       └── ValueSerializer.cs    # Serialization for all 7 value types
+│   └── HiveDB.Cli/                   # CLI tool (net8.0)
+│       └── Program.cs                # 9 commands with full implementation
+├── test/
+│   └── HiveDB.Tests/                 # xUnit test project (120 tests)
+│       ├── ConcurrencyTests.cs       # Multi-threaded read/write stress tests
+│       ├── CorruptionTests.cs        # Tampered file, CRC mismatch, truncated file
+│       ├── CryptoPageTests.cs        # GCM encryption, HMAC signing, tamper detection
+│       ├── KeyPageTests.cs           # Key page serialization round-trips
+│       ├── PageManagerTests.cs       # Page allocation, overflow chains, free list
+│       ├── RegistryDatabaseTests.cs  # Full CRUD, dispose, edge cases
+│       ├── RegistryKeyTests.cs       # Tree navigation, parent/child, generic GetValue
+│       ├── TreeNavigatorTests.cs     # Path resolution, create-missing, subtree walk
+│       └── ValueSerializerTests.cs   # Serialize/deserialize for all value types
+├── HiveDB.sln
+└── readme.md
+```
+
+---
+
+## Build & Test
+
+```bash
+# Build the solution
+dotnet build HiveDB.sln
+
+# Run all 120 tests
+dotnet test HiveDB.sln
+
+# Build and run the CLI
+dotnet run --project src/HiveDB.Cli -- --help
+```
+
+## License
+
+This project is for educational and research purposes.
