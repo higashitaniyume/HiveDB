@@ -60,14 +60,15 @@ public class CorruptionTests : IDisposable
         // Create a valid file
         using (var db = RegistryDatabase.Create(_filePath)) { }
 
-        // Corrupt a header field (after the fields but before CRC)
+        // Corrupt the stored CRC-32 field at offset 24
         using (var fs = new FileStream(_filePath, FileMode.Open, FileAccess.Write))
         {
-            fs.Seek(4, SeekOrigin.Begin); // version field
+            fs.Seek(24, SeekOrigin.Begin); // CRC-32 field
             fs.WriteByte(0xFF);
         }
 
-        Assert.Throws<HiveDBException>(() => RegistryDatabase.Open(_filePath));
+        var ex = Assert.Throws<HiveDBException>(() => RegistryDatabase.Open(_filePath));
+        Assert.Contains("CRC", ex.Message);
     }
 
     [Fact]

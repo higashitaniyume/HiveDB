@@ -7,7 +7,7 @@ internal sealed class PageManager : IDisposable
     private readonly BinaryFileHandle _file;
     private readonly PageCache _cache;
     private readonly ReaderWriterLockSlim _rwLock = new(LockRecursionPolicy.SupportsRecursion);
-    private const int GrowthPages = 16;
+    private const int GrowthPages = 8;
     private CryptoManager? _crypto;
 
     internal CryptoManager? CryptoManager
@@ -110,6 +110,7 @@ internal sealed class PageManager : IDisposable
 
         if (header.FreePageHead != 0)
         {
+            // Reuse from free list
             page = header.FreePageHead;
             var freeBuffer = ReadPage(header.FreePageHead);
             int nextFree = BinaryPrimitives.ReadInt32LittleEndian(freeBuffer.AsSpan(4));
@@ -118,24 +119,28 @@ internal sealed class PageManager : IDisposable
         }
         else
         {
-            int currentCount = header.TotalPageCount;
-            long currentLength = currentCount * (long)FileHeader.PageSize;
-            long newLength = (currentCount + GrowthPages) * (long)FileHeader.PageSize;
+            // Grow the file by GrowthPages, allocate the first, chain the rest
+            int firstNew = header.TotalPageCount;
+            int lastNew = firstNew + GrowthPages - 1;
+            long newLength = (firstNew + GrowthPages) * (long)FileHeader.PageSize;
             _file.SetLength(newLength);
 
-            // Zero-fill new pages by writing empty buffers
-            var empty = new byte[FileHeader.PageSize];
-            for (int i = 0; i < GrowthPages; i++)
-                _file.WritePage(currentCount + i, empty);
+            page = firstNew;
 
-            page = currentCount;
-            header.TotalPageCount = currentCount + GrowthPages;
+            // Chain unused pages into the free list
+            for (int i = firstNew + 1; i <= lastNew; i++)
+            {
+                var freeBuffer = new byte[FileHeader.PageSize];
+                freeBuffer[0] = (byte)PageType.Free;
+                int next = (i < lastNew) ? (i + 1) : header.FreePageHead;
+                BinaryPrimitives.WriteInt32LittleEndian(freeBuffer.AsSpan(4), next);
+                WritePage(i, freeBuffer);
+            }
+            header.FreePageHead = firstNew + 1;
+            header.TotalPageCount = firstNew + GrowthPages;
             WriteHeader(header);
         }
 
-        var buffer = new byte[FileHeader.PageSize];
-        buffer[0] = (byte)type;
-        WritePage(page, buffer);
         return page;
     }
 

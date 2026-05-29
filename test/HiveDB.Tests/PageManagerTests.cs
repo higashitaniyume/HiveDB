@@ -56,12 +56,16 @@ public class PageManagerTests : IDisposable
     [Fact]
     public void AllocatePage_ReusesFreePages()
     {
+        // Trigger growth; this leaves GrowthPages-1 pages on the free list
         int page = _pages.AllocatePage(PageType.Key);
+        int freeAfterGrowth = _pages.FreePageCount;
+
         _pages.FreePage(page);
+        Assert.Equal(freeAfterGrowth + 1, _pages.FreePageCount);
 
         int reused = _pages.AllocatePage(PageType.Key);
         Assert.Equal(page, reused);
-        Assert.Equal(0, _pages.FreePageCount);
+        Assert.Equal(freeAfterGrowth, _pages.FreePageCount);
     }
 
     [Fact]

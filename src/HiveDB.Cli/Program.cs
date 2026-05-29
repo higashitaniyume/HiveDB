@@ -49,6 +49,7 @@ var root = new RootCommand("HiveDB CLI —— HiveDB 数据库文件交互工具
     DeleteKeyCommand(fileArg, pathArg, recursiveOpt, passwordOpt),
     DeleteValueCommand(fileArg, pathArg, nameArg, passwordOpt),
     InfoCommand(fileArg, passwordOpt),
+    TreeCommand(fileArg, pathArgOpt, passwordOpt),
     TestCommand(fileArgNew, passwordOpt, signOpt),
     BenchCommand(fileArgNew, countOpt, passwordOpt, signOpt),
 };
@@ -241,6 +242,61 @@ static Command InfoCommand(Argument<FileInfo> fileArg, Option<string?> passwordO
         Console.WriteLine($"根子键数:    {db.GetSubKeyNames("").Length}");
     });
     return cmd;
+}
+
+static Command TreeCommand(Argument<FileInfo> fileArg, Argument<string> pathArg, Option<string?> passwordOpt)
+{
+    var cmd = new Command("tree", "树形显示数据库结构");
+    cmd.Add(fileArg);
+    cmd.Add(pathArg);
+    cmd.Add(passwordOpt);
+    cmd.SetAction((ParseResult pr) =>
+    {
+        var file = pr.GetValue(fileArg)!;
+        var rootPath = pr.GetValue(pathArg)!;
+        var password = pr.GetValue(passwordOpt);
+        using var db = RegistryDatabase.Open(file.FullName, readOnly: true, password: password);
+
+        if (rootPath != "" && !db.KeyExists(rootPath))
+        {
+            Console.Error.WriteLine($"键不存在: '{rootPath}'");
+            return;
+        }
+
+        string displayName = rootPath == "" ? "(根)" : rootPath;
+        Console.WriteLine(displayName);
+
+        PrintTree(db, rootPath, "", true);
+    });
+    return cmd;
+}
+
+static void PrintTree(RegistryDatabase db, string path, string indent, bool isLast)
+{
+    string[] subKeys = db.GetSubKeyNames(path);
+    string[] values = db.GetValueNames(path);
+
+    // Show values first
+    foreach (var vn in values.OrderBy(x => x))
+    {
+        object? v = db.GetValue(path, vn);
+        var kind = db.GetValueKind(path, vn);
+        Console.WriteLine($"{indent}    {vn} = {FormatValue(v)} ({kind})");
+    }
+
+    // Show sub-keys with tree connectors
+    for (int i = 0; i < subKeys.Length; i++)
+    {
+        string sk = subKeys[i];
+        bool last = i == subKeys.Length - 1;
+        string connector = last ? "└── " : "├── ";
+        string childIndent = indent + (last ? "    " : "│   ");
+
+        Console.WriteLine($"{indent}{connector}[{sk}]");
+
+        string childPath = path == "" ? sk : $"{path}\\{sk}";
+        PrintTree(db, childPath, childIndent, last);
+    }
 }
 
 static Command TestCommand(Argument<FileInfo> fileArg, Option<string?> passwordOpt, Option<bool> signOpt)
