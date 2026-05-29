@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build *)",
+      "Bash(dotnet csharp *)",
+      "Bash(grep 'Argument\\\\`1' \"C:/Users/shimikoi/.nuget/packages/system.commandline/2.0.8/lib/net8.0/System.CommandLine.xml\")",
+      "Bash(grep -E '\\(Option\\\\`1|Option\\\\.#ctor|CommandLineAction|SetHandler|Symbol\\\\.|IdentifierSymbol|CliAction|ParseResult|InvocationContext|InvokeAsync|Invoke|Parse\\)' \"C:/Users/shimikoi/.nuget/packages/system.commandline/2.0.8/lib/net8.0/System.CommandLine.xml\")",
+      "Bash(grep -E '\\(Option\\\\`1|GetValue|Symbol\\\\.#ctor|Symbol\\\\.Description\\)' \"C:/Users/shimikoi/.nuget/packages/system.commandline/2.0.8/lib/net8.0/System.CommandLine.xml\")",
+      "Bash(grep *)",
+      "Bash(dotnet run *)",
+      "Bash(xxd /tmp/test_hive_magic.db)",
+      "Bash(xxd /tmp/test_enc.db)",
+      "Bash(xxd /tmp/test_sign.db)",
+      "Bash(xxd -s 4096 /tmp/test_sign.db)",
+      "Bash(xxd -s 4096 /tmp/test_enc.db)",
+      "Bash(dd of=/tmp/t3_sign_tampered.db bs=1 seek=4097 count=1 conv=notrunc)",
+      "Bash(xxd -s 4096 -l 64 /tmp/t3_sign.db)",
+      "Bash(xxd -s 4096 -l 64 /tmp/t3_sign_tampered.db)",
+      "Bash(dd of=/tmp/t3_sign_tampered.db bs=1 seek=4100 count=1 conv=notrunc)",
+      "Bash(xxd -s 4096 -l 16 /tmp/t3_sign_tampered.db)",
+      "Bash(xxd -s 4096 -l 16 /tmp/t3_sign.db)",
+      "Bash(dotnet test *)"
+    ]
+  }
+}

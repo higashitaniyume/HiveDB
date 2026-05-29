@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet --list-sdks)",
+      "Bash(dotnet new *)",
+      "Bash(dotnet --version)",
+      "Bash(dotnet sln *)",
+      "Bash(dotnet add *)",
+      "Bash(mv Valency.Database/* .)",
+      "Bash(rm -rf Valency.Database)",
+      "Bash(mv Valency.Database.Tests/* .)",
+      "Bash(rm -rf Valency.Database.Tests)",
+      "Bash(dotnet build *)",
+      "Bash(dotnet test *)",
+      "Bash(dotnet nuget list *)",
+      "Bash(dotnet restore *)",
+      "Bash(dotnet nuget locals *)"
+    ]
+  }
+}
